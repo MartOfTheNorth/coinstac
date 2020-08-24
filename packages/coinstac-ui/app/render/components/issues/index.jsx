@@ -1,14 +1,22 @@
+/* eslint-disable no-console */
 import React, { Component } from 'react';
 import PropTypes from 'prop-types';
 import { connect } from 'react-redux';
 import { compose, graphql, withApollo } from 'react-apollo';
-import { ValidatorForm, TextValidator } from 'react-material-ui-form-validator';
+import axios from 'axios';
+import crypto from 'crypto';
 import { trim } from 'lodash';
+import classNames from 'classnames';
+import Dropzone from 'react-dropzone';
+import { ValidatorForm, TextValidator } from 'react-material-ui-form-validator';
 import Button from '@material-ui/core/Button';
+import CircularProgress from '@material-ui/core/CircularProgress';
 import Dialog from '@material-ui/core/Dialog';
 import DialogActions from '@material-ui/core/DialogActions';
 import DialogContent from '@material-ui/core/DialogContent';
 import DialogTitle from '@material-ui/core/DialogTitle';
+import Icon from '@material-ui/core/Icon';
+import InputLabel from '@material-ui/core/InputLabel';
 import Typography from '@material-ui/core/Typography';
 import { withStyles } from '@material-ui/core/styles';
 import {
@@ -20,6 +28,14 @@ import {
 import { notifySuccess, notifyError } from '../../state/ducks/notifyAndLog';
 import StatusButtonWrapper from '../common/status-button-wrapper';
 import MarkdownValidator from './markdown-validator';
+
+const {
+  CLOUDINARY_UPLOAD_PRESET,
+  CLOUDINARY_API_KEY,
+  CLOUDINARY_API_SECRET,
+  CLOUDINARY_UPLOAD_URL,
+  CLOUDINARY_DELETE_URL,
+} = process.env;
 
 const styles = theme => ({
   tabTitleContainer: {
@@ -42,6 +58,60 @@ const styles = theme => ({
       outline: 'none',
     },
   },
+  imageUploadContainer: {
+    marginTop: theme.spacing(6),
+  },
+  imageUploadLabel: {
+    color: theme.palette.grey[600],
+    fontSize: 16,
+  },
+  imageUpload: {
+    borderColor: theme.palette.grey[600],
+    borderStyle: 'dashed',
+    borderWidth: '2px',
+    padding: theme.spacing(2),
+    marginTop: theme.spacing(1),
+    marginBottom: theme.spacing(1),
+  },
+  imagePreviewContainer: {
+    display: 'flex',
+  },
+  imagePreview: {
+    margin: theme.spacing(2),
+    marginLeft: 0,
+    position: 'relative',
+  },
+  imagePreviewImg: {
+    width: 100,
+    height: 100,
+  },
+  imagePreviewDeleteButton: {
+    padding: 0,
+    border: 'none',
+  },
+  timesIcon: {
+    color: '#f05a29',
+    fontSize: 20,
+    position: 'absolute',
+    top: -theme.spacing(3) / 2,
+    right: -theme.spacing(3) / 2,
+    background: 'white',
+    borderRadius: '50%',
+    border: '2px solid white',
+    width: theme.spacing(3),
+    height: theme.spacing(3),
+    cursor: 'pointer',
+  },
+  dragDrop: {
+    cursor: 'pointer',
+    textAlign: 'center',
+    '&:focus': {
+      outline: 'none',
+    },
+  },
+  progress: {
+    margin: 'auto 0',
+  },
 });
 
 const issueTemplate = `**Describe the bug**
@@ -57,9 +127,6 @@ Steps to reproduce the behavior:
 **Expected behavior**
 A clear and concise description of what you expected to happen.
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
-
 **Desktop (please complete the following information):**
  - OS: [e.g. Windows 10, OSX 11.15]
  - Version [eg 5.0.1] - in the very top menu got to Coinstac -> about 
@@ -72,6 +139,7 @@ const INITIAL_STATE = {
   title: '',
   content: issueTemplate,
   isOpenDialog: false,
+  screenshots: [],
   savingStatus: 'init',
 };
 
@@ -96,13 +164,28 @@ class Issue extends Component {
   }
 
   handleSubmit = (includeLogs) => {
-    const { title, content, logs } = this.state;
+    const {
+      title, content, logs, screenshots,
+    } = this.state;
     const { createIssue, notifySuccess, notifyError } = this.props;
 
     this.setState({ savingStatus: 'pending', isOpenDialog: false });
 
-    // eslint-disable-next-line prefer-template
-    const body = includeLogs ? content + '\n**Logs**\n```' + logs + '```' : content;
+    let body = content;
+
+    if (screenshots.length > 0) {
+      body = `${body}\n**Screenshots**`;
+      screenshots.forEach((screenshot) => {
+        body = `${body}\n${screenshot.imageUrl}`;
+      });
+
+      body = `${body}\n`;
+    }
+
+    if (includeLogs) {
+      // eslint-disable-next-line prefer-template
+      body = body + '\n**Logs**\n```' + logs + '```';
+    }
 
     createIssue({ title: trim(title), body })
       .then(() => {
@@ -119,10 +202,72 @@ class Issue extends Component {
       });
   }
 
+  uploadImage = async (image) => {
+    const fd = new FormData();
+    fd.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+    fd.append('tags', 'browser_upload');
+    fd.append('file', image);
+
+    try {
+      const response = await axios.post(CLOUDINARY_UPLOAD_URL, fd);
+      return {
+        imageId: response.data.public_id,
+        imageUrl: response.data.secure_url,
+      };
+    } catch (error) {
+      console.log(error);
+    }
+  }
+
+  handleImageDrop = (images) => {
+    const { screenshots } = this.state;
+    const imageCount = images.length;
+
+    if (imageCount === 0 || imageCount + screenshots.length > 5) {
+      return;
+    }
+
+    this.setState({ uploading: true });
+
+    const uploadPromises = images.map(image => this.uploadImage(image));
+
+    Promise.all(uploadPromises)
+      .then((screenshots) => {
+        this.setState({ uploading: false, screenshots });
+      })
+      .catch((error) => {
+        console.log(error);
+      });
+  }
+
+  removeImage = (imageId) => {
+    const date = new Date();
+    const timestamp = date.getTime();
+    const hash = crypto.createHash('sha1');
+    const sign = hash.update(`public_id=${imageId}&timestamp=${timestamp}${CLOUDINARY_API_SECRET}`).digest('hex');
+
+    const fd = new FormData();
+    fd.append('public_id', imageId);
+    fd.append('api_key', CLOUDINARY_API_KEY);
+    fd.append('timestamp', timestamp);
+    fd.append('signature', sign);
+
+    axios.post(CLOUDINARY_DELETE_URL, fd)
+      .then(() => {
+        const { screenshots } = this.state;
+        this.setState({
+          screenshots: screenshots.filter(screenshot => screenshot.imageId !== imageId),
+        });
+      })
+      .catch((error) => {
+        console.log(error);
+      });
+  }
+
   render() {
     const { classes } = this.props;
     const {
-      title, content, logs, isOpenDialog, savingStatus,
+      title, content, logs, isOpenDialog, uploading, screenshots, savingStatus,
     } = this.state;
 
     return (
@@ -172,6 +317,49 @@ class Issue extends Component {
           withRequiredValidator
           onChange={content => this.handleChange('content', content)}
         />
+        <div className={classes.imageUploadContainer}>
+          <InputLabel>
+            Screenshots (Max 5 images)
+          </InputLabel>
+          <div className={classes.imageUpload}>
+            <Dropzone
+              onDrop={this.handleImageDrop}
+              multiple
+              accept="image/*"
+              maxSize={1024 * 1024 * 3}
+              disabled={uploading || savingStatus === 'pending'}
+            >
+              {
+                ({ getRootProps, getInputProps }) => (
+                  <div {...getRootProps()} className={classes.dragDrop}>
+                    {uploading ? <CircularProgress className={classes.progress} /> : (
+                      <div>
+                        <input {...getInputProps()} />
+                        <div>
+                          Drag and drop some images here, or click to select images
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              }
+            </Dropzone>
+          </div>
+          <div className={classes.imagePreviewContainer}>
+            {screenshots.map(screenshot => (
+              <div key={screenshot.imageId} className={classes.imagePreview}>
+                <img className={classes.imagePreviewImg} src={screenshot.imageUrl} alt="user" />
+                <button
+                  className={classes.imagePreviewDeleteButton}
+                  onClick={() => this.removeImage(screenshot.imageId)}
+                  type="button"
+                >
+                  <Icon className={classNames('fa fa-times-circle', classes.timesIcon)} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
         <Dialog
           open={isOpenDialog}
           maxWidth="md"
